@@ -2,7 +2,6 @@ package mcpserver
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -166,24 +165,25 @@ func (s *Server) addResourcesConcurrently(recipes *paprika.RecipeList) {
 
 func (s *Server) createRecipe(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start := time.Now()
-	name, ok := req.Params.Arguments["name"].(string)
-	if !ok || len(name) == 0 {
-		return nil, errors.New("name is required")
+	name, err := req.RequireString("name")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
-	ingredients, ok := req.Params.Arguments["ingredients"].(string)
-	if !ok || len(ingredients) == 0 {
-		return nil, errors.New("ingredients are required")
+	ingredients, err := req.RequireString("ingredients")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
-	directions, ok := req.Params.Arguments["directions"].(string)
-	if !ok || len(directions) == 0 {
-		return nil, errors.New("directions are required")
+	directions, err := req.RequireString("directions")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
-	servings := req.Params.Arguments["servings"].(string)
-	prepTime := req.Params.Arguments["prep_time"].(string)
-	cookTime := req.Params.Arguments["cook_time"].(string)
-	description := req.Params.Arguments["description"].(string)
-	notes := req.Params.Arguments["notes"].(string)
-	difficulty := req.Params.Arguments["difficulty"].(string)
+
+	servings := req.GetString("servings", "")
+	prepTime := req.GetString("prep_time", "")
+	cookTime := req.GetString("cook_time", "")
+	description := req.GetString("description", "")
+	notes := req.GetString("notes", "")
+	difficulty := req.GetString("difficulty", "")
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -214,46 +214,28 @@ func (s *Server) createRecipe(ctx context.Context, req mcp.CallToolRequest) (*mc
 
 func (s *Server) updateRecipe(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start := time.Now()
-	uid, ok := req.Params.Arguments["uid"].(string)
-	if !ok || len(uid) == 0 {
-		return nil, errors.New("uid is required")
+	uid, err := req.RequireString("uid")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
-	name, ok := req.Params.Arguments["name"].(string)
-	if !ok || len(name) == 0 {
-		return nil, errors.New("name is required")
+	name, err := req.RequireString("name")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
-	ingredients, ok := req.Params.Arguments["ingredients"].(string)
-	if !ok || len(ingredients) == 0 {
-		return nil, errors.New("ingredients are required")
+	ingredients, err := req.RequireString("ingredients")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
-	directions, ok := req.Params.Arguments["directions"].(string)
-	if !ok || len(directions) == 0 {
-		return nil, errors.New("directions are required")
+	directions, err := req.RequireString("directions")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
-	description, ok := req.Params.Arguments["description"].(string)
-	if !ok {
-		return nil, errors.New("description is required")
-	}
-	servings, ok := req.Params.Arguments["servings"].(string)
-	if !ok {
-		return nil, errors.New("servings is required")
-	}
-	prepTime, ok := req.Params.Arguments["prep_time"].(string)
-	if !ok {
-		return nil, errors.New("prepTime is required")
-	}
-	cookTime, ok := req.Params.Arguments["cook_time"].(string)
-	if !ok {
-		return nil, errors.New("cookTime is required")
-	}
-	notes, ok := req.Params.Arguments["notes"].(string)
-	if !ok {
-		return nil, errors.New("notes is required")
-	}
-	difficulty, ok := req.Params.Arguments["difficulty"].(string)
-	if !ok {
-		return nil, errors.New("difficulty is required")
-	}
+	servings := req.GetString("servings", "")
+	prepTime := req.GetString("prep_time", "")
+	cookTime := req.GetString("cook_time", "")
+	description := req.GetString("description", "")
+	notes := req.GetString("notes", "")
+	difficulty := req.GetString("difficulty", "")
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
