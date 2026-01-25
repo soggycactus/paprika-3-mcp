@@ -53,6 +53,8 @@ func (s *Server) Start() {
 		mcp.WithString("servings", mcp.Description("The number of servings for the recipe"), mcp.DefaultString("")),
 		mcp.WithString("prep_time", mcp.Description("The prep time for the recipe"), mcp.DefaultString("")),
 		mcp.WithString("cook_time", mcp.Description("The cook time for the recipe"), mcp.DefaultString("")),
+		mcp.WithString("source", mcp.Description("The source of the recipe"), mcp.DefaultString("")),
+		mcp.WithString("source_url", mcp.Description("The URL of the source of the recipe"), mcp.DefaultString("")),
 		mcp.WithString("difficulty", mcp.Description("The difficulty of the recipe"), mcp.DefaultString("")),
 	)
 	updateRecipeTool := mcp.NewTool("update_paprika_recipe",
@@ -66,6 +68,8 @@ func (s *Server) Start() {
 		mcp.WithString("servings", mcp.Description("The number of servings for the recipe"), mcp.Required()),
 		mcp.WithString("prep_time", mcp.Description("The prep time for the recipe"), mcp.Required()),
 		mcp.WithString("cook_time", mcp.Description("The cook time for the recipe"), mcp.Required()),
+		mcp.WithString("source", mcp.Description("The source of the recipe"), mcp.Required()),
+		mcp.WithString("source_url", mcp.Description("The URL of the source of the recipe"), mcp.Required()),
 		mcp.WithString("difficulty", mcp.Description("The difficulty of the recipe"), mcp.Required()),
 	)
 	s.server.AddTools(server.ServerTool{
@@ -181,6 +185,8 @@ func (s *Server) createRecipe(ctx context.Context, req mcp.CallToolRequest) (*mc
 	servings := req.Params.Arguments["servings"].(string)
 	prepTime := req.Params.Arguments["prep_time"].(string)
 	cookTime := req.Params.Arguments["cook_time"].(string)
+	source := req.Params.Arguments["source"].(string)
+	sourceURL := req.Params.Arguments["source_url"].(string)
 	description := req.Params.Arguments["description"].(string)
 	notes := req.Params.Arguments["notes"].(string)
 	difficulty := req.Params.Arguments["difficulty"].(string)
@@ -195,6 +201,8 @@ func (s *Server) createRecipe(ctx context.Context, req mcp.CallToolRequest) (*mc
 		Servings:    servings,
 		PrepTime:    prepTime,
 		CookTime:    cookTime,
+		Source:      source,
+		SourceURL:   sourceURL,
 		Notes:       notes,
 		Difficulty:  difficulty,
 	})
@@ -250,6 +258,14 @@ func (s *Server) updateRecipe(ctx context.Context, req mcp.CallToolRequest) (*mc
 	if !ok {
 		return nil, errors.New("notes is required")
 	}
+	source, ok := req.Params.Arguments["source"].(string)
+	if !ok {
+		return nil, errors.New("source is required")
+	}
+	sourceURL, ok := req.Params.Arguments["source_url"].(string)
+	if !ok {
+		return nil, errors.New("source_url is required")
+	}
 	difficulty, ok := req.Params.Arguments["difficulty"].(string)
 	if !ok {
 		return nil, errors.New("difficulty is required")
@@ -266,6 +282,8 @@ func (s *Server) updateRecipe(ctx context.Context, req mcp.CallToolRequest) (*mc
 		Servings:    servings,
 		PrepTime:    prepTime,
 		CookTime:    cookTime,
+		Source:      source,
+		SourceURL:   sourceURL,
 		Notes:       notes,
 		Difficulty:  difficulty,
 	})

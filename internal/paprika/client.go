@@ -236,7 +236,7 @@ func (r *Recipe) ToMarkdown() string {
 		sb.WriteString(fmt.Sprintf("_%s_\n\n", r.Description))
 	}
 
-	if r.Servings != "" || r.PrepTime != "" || r.CookTime != "" || r.Difficulty != "" {
+	if r.Servings != "" || r.PrepTime != "" || r.CookTime != "" || r.Difficulty != "" || r.Source != "" || r.SourceURL != "" {
 		sb.WriteString("## Details\n")
 		if r.Servings != "" {
 			sb.WriteString(fmt.Sprintf("- **Servings:** %s\n", r.Servings))
@@ -249,6 +249,12 @@ func (r *Recipe) ToMarkdown() string {
 		}
 		if r.Difficulty != "" {
 			sb.WriteString(fmt.Sprintf("- **Difficulty:** %s\n", r.Difficulty))
+		}
+		if r.Source != "" {
+			sb.WriteString(fmt.Sprintf("- **Source:** %s\n", r.Source))
+		}
+		if r.SourceURL != "" {
+			sb.WriteString(fmt.Sprintf("- **Source URL:** %s\n", r.SourceURL))
 		}
 		sb.WriteString("\n")
 	}
