@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime"
 	"sort"
 	"strings"
@@ -109,7 +110,7 @@ type errorResponse struct {
 // login authenticates with the Paprika API and returns an authentication token
 // The token is used for all subsequent requests to the API. As far as I can tell, this is a JWT with no expiration.
 func login(ctx context.Context, client http.Client, username, password string) (string, error) {
-	body := fmt.Sprintf("email=%s&password=%s", username, password)
+	body := url.Values{"email": {username}, "password": {password}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://paprikaapp.com/api/v1/account/login", bytes.NewBufferString(body))
 	if err != nil {
 		return "", err
