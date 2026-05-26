@@ -413,6 +413,13 @@ func (c *Client) DeleteRecipe(ctx context.Context, recipe Recipe) (*Recipe, erro
 // SaveRecipe saves a recipe to the Paprika API. If the recipe already exists, it will be updated.
 // If the recipe does not exist, it will be created.
 func (c *Client) SaveRecipe(ctx context.Context, recipe Recipe) (*Recipe, error) {
+	// Categories must serialize as [] not null. A nil []string marshals to "null",
+	// which breaks the Paprika .NET clients' sync deserializer with
+	// "Value cannot be null. Parameter name: collection" (see issue #7).
+	// Normalize here so every caller is protected, not just the create/update handlers.
+	if recipe.Categories == nil {
+		recipe.Categories = []string{}
+	}
 	// set the created timestamp
 	recipe.updateCreated()
 	// generate a new UUID if one doesn't exist
