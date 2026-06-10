@@ -29,8 +29,8 @@ func getLogFilePath() string {
 }
 
 func main() {
-	username := flag.String("username", "", "Paprika 3 username (email)")
-	password := flag.String("password", "", "Paprika 3 password")
+	username := flag.String("username", "", "Paprika 3 username (email). Falls back to $PAPRIKA_USERNAME.")
+	password := flag.String("password", "", "Paprika 3 password. Falls back to $PAPRIKA_PASSWORD.")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -39,8 +39,15 @@ func main() {
 		os.Exit(0)
 	}
 
+	if *username == "" {
+		*username = os.Getenv("PAPRIKA_USERNAME")
+	}
+	if *password == "" {
+		*password = os.Getenv("PAPRIKA_PASSWORD")
+	}
+
 	if *username == "" || *password == "" {
-		fmt.Fprintln(os.Stderr, "username and password are required")
+		fmt.Fprintln(os.Stderr, "username and password are required (set --username/--password flags or PAPRIKA_USERNAME/PAPRIKA_PASSWORD env vars)")
 		os.Exit(1)
 	}
 

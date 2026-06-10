@@ -19,10 +19,31 @@ See anything missing? Open an issue on this repo to request a feature!
 
 #### 🛠 **Tools**
 
-- `create_paprika_recipe`  
-  Allows Claude to save a new recipe to your Paprika app
-- `update_paprika_recipe`  
-  Allows Claude to modify an existing recipe
+**Recipe Management**
+- `create_paprika_recipe`
+  Create new recipes in your Paprika app
+- `update_paprika_recipe`
+  Modify existing recipes
+- `get_recipe`
+  Get full recipe details by UID
+- `search_recipes`
+  Search and list recipes from your collection
+
+**Meal Planning**
+- `list_meal_plan`
+  View your scheduled meals by date range
+- `add_meal_to_plan`
+  Add meals to your calendar (supports Breakfast, Lunch, Dinner)
+- `remove_meal_from_plan`
+  Remove meals from your plan
+
+**Grocery Management**
+- `list_groceries`
+  View your grocery/shopping list with purchase status
+- `add_grocery_item`
+  Add items to your shopping list
+- `remove_grocery_item`
+  Remove items from your shopping list
 
 ## ⚙️ Prerequisites
 
