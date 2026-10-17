@@ -39,6 +39,14 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Env vars keep credentials out of the process command line; flags win.
+	if *username == "" {
+		*username = os.Getenv("PAPRIKA_USERNAME")
+	}
+	if *password == "" {
+		*password = os.Getenv("PAPRIKA_PASSWORD")
+	}
+
 	if *username == "" || *password == "" {
 		fmt.Fprintln(os.Stderr, "username and password are required")
 		os.Exit(1)

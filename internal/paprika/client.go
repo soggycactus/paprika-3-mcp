@@ -38,6 +38,84 @@ func (r *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return r.transport.RoundTrip(req)
 }
 
+// retryTransport wraps an http.RoundTripper with retry logic for 429 and 5xx responses.
+// It uses exponential backoff and respects the Retry-After header.
+type retryTransport struct {
+	transport  http.RoundTripper
+	maxRetries int
+	baseDelay  time.Duration
+}
+
+func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Read body upfront so we can replay it on retries
+	var bodyBytes []byte
+	if req.Body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read request body: %w", err)
+		}
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
+
+	var resp *http.Response
+	var err error
+
+	for attempt := 0; attempt <= t.maxRetries; attempt++ {
+		if bodyBytes != nil && attempt > 0 {
+			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+
+		resp, err = t.transport.RoundTrip(req)
+		if err != nil {
+			// Retry network errors (connection resets, header timeouts):
+			// paprikaapp.com drops connections intermittently. Sync writes
+			// upsert by UID, so replaying a POST is safe.
+			if attempt == t.maxRetries {
+				return nil, err
+			}
+			select {
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			case <-time.After(t.baseDelay * (1 << attempt)):
+			}
+			continue
+		}
+
+		// Don't retry on success or client errors (except 429)
+		if resp.StatusCode < 429 || (resp.StatusCode > 429 && resp.StatusCode < 500) {
+			return resp, nil
+		}
+
+		// Last attempt — return whatever we got
+		if attempt == t.maxRetries {
+			return resp, nil
+		}
+
+		// Calculate delay: use Retry-After header if present, otherwise exponential backoff
+		delay := t.baseDelay * (1 << attempt)
+		if resp.StatusCode == 429 {
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if seconds, parseErr := time.ParseDuration(ra + "s"); parseErr == nil {
+					delay = seconds
+				}
+			}
+		}
+
+		// Drain and close the response body before retrying
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		case <-time.After(delay):
+		}
+	}
+
+	return resp, nil
+}
+
 func userAgent(version string) string {
 	return fmt.Sprintf("paprika-3-mcp/%s (golang; %s)", version, runtime.Version())
 }
@@ -60,20 +138,36 @@ func NewClient(username, password, version string, logger *slog.Logger) (*Client
 		Timeout:   10 * time.Second,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	token, err := login(ctx, *client, username, password)
+	// Retry login: paprikaapp.com intermittently resets connections.
+	var token string
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		token, err = login(ctx, *client, username, password)
+		cancel()
+		if err == nil {
+			break
+		}
+		logger.Warn("login attempt failed", "attempt", attempt, "err", err)
+		if attempt < 3 {
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to login: %w", err)
 	}
 
-	client.Transport = &roundTripper{
-		transport: t,
-		headers: map[string]string{
-			"Accept":        "*/*",
-			"Authorization": fmt.Sprintf("Bearer %s", token),
-			"Connection":    "keep-alive",
-			"User-Agent":    userAgent(version),
+	client.Transport = &retryTransport{
+		maxRetries: 3,
+		baseDelay:  500 * time.Millisecond,
+		transport: &roundTripper{
+			transport: t,
+			headers: map[string]string{
+				"Accept":        "*/*",
+				"Authorization": fmt.Sprintf("Bearer %s", token),
+				"Connection":    "keep-alive",
+				"User-Agent":    userAgent(version),
+			},
 		},
 	}
 
@@ -83,14 +177,18 @@ func NewClient(username, password, version string, logger *slog.Logger) (*Client
 	}
 
 	return &Client{
-		client: client,
-		logger: l,
+		client:   client,
+		logger:   l,
+		username: username,
+		password: password,
 	}, nil
 }
 
 type Client struct {
-	client *http.Client
-	logger *slog.Logger
+	client   *http.Client
+	logger   *slog.Logger
+	username string
+	password string
 }
 
 type loginResponse struct {
@@ -186,6 +284,60 @@ func (c *Client) ListRecipes(ctx context.Context) (*RecipeList, error) {
 
 	c.logger.Info("found recipes", "count", len(recipeList.Result))
 	return &recipeList, nil
+}
+
+const (
+	MealTypeBreakfast = 0
+	MealTypeLunch     = 1
+	MealTypeDinner    = 2
+)
+
+// MealTypeName returns a human-readable name for a meal type constant.
+func MealTypeName(t int) string {
+	switch t {
+	case MealTypeBreakfast:
+		return "Breakfast"
+	case MealTypeLunch:
+		return "Lunch"
+	case MealTypeDinner:
+		return "Dinner"
+	default:
+		return "Meal"
+	}
+}
+
+type MealPlan struct {
+	UID       string `json:"uid"`
+	RecipeUID string `json:"recipe_uid"`
+	Date      string `json:"date"`
+	Type      int    `json:"type"`
+	Name      string `json:"name"`
+	OrderFlag int    `json:"order_flag"`
+	Deleted   bool   `json:"deleted"`
+}
+
+type MealPlanResponse struct {
+	Result []MealPlan `json:"result"`
+}
+
+type GroceryItem struct {
+	UID         string `json:"uid"`
+	RecipeUID   string `json:"recipe_uid"`
+	Name        string `json:"name"`
+	OrderFlag   int    `json:"order_flag"`
+	Purchased   bool   `json:"purchased"`
+	Aisle       string `json:"aisle"`
+	Ingredient  string `json:"ingredient"`
+	Recipe      string `json:"recipe"`
+	Instruction string `json:"instruction"`
+	Quantity    string `json:"quantity"`
+	AisleUID    string `json:"aisle_uid"`
+	ListUID     string `json:"list_uid"`
+	Deleted     bool   `json:"deleted"` // Soft delete flag (like MealPlan)
+}
+
+type GroceryResponse struct {
+	Result []GroceryItem `json:"result"`
 }
 
 type Recipe struct {
@@ -344,26 +496,6 @@ func (r *Recipe) updateHash() error {
 	return nil
 }
 
-func (r *Recipe) asGzip() ([]byte, error) {
-	jsonBytes, err := json.Marshal(r)
-	if err != nil {
-		return nil, err
-	}
-
-	var buf bytes.Buffer
-	writer := gzip.NewWriter(&buf)
-	_, err = writer.Write(jsonBytes)
-	if err != nil {
-		writer.Close()
-		return nil, err
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-
-	return buf.Bytes(), nil
-}
-
 type GetRecipeResponse struct {
 	Result Recipe `json:"result"`
 }
@@ -413,74 +545,24 @@ func (c *Client) DeleteRecipe(ctx context.Context, recipe Recipe) (*Recipe, erro
 // SaveRecipe saves a recipe to the Paprika API. If the recipe already exists, it will be updated.
 // If the recipe does not exist, it will be created.
 func (c *Client) SaveRecipe(ctx context.Context, recipe Recipe) (*Recipe, error) {
-	// set the created timestamp
+	// Categories must serialize as [] not null. A nil []string marshals to "null",
+	// which breaks the Paprika .NET clients' sync deserializer with
+	// "Value cannot be null. Parameter name: collection" (see issue #7).
+	// Normalize here so every caller is protected, not just the create/update handlers.
+	if recipe.Categories == nil {
+		recipe.Categories = []string{}
+	}
 	recipe.updateCreated()
-	// generate a new UUID if one doesn't exist
 	recipe.generateUUID()
-	// generate a hash of the recipe object
 	if err := recipe.updateHash(); err != nil {
 		return nil, err
 	}
 
-	// gzip the recipe
-	fileData, err := recipe.asGzip()
-	if err != nil {
-		return nil, err
-	}
-
-	// Create a multipart form request
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	part, err := writer.CreateFormFile("data", "data")
-	if err != nil {
-		c.logger.Error("failed to create form file", "error", err)
-		return nil, err
-	}
-
-	// Write the gzipped JSON data to the form file
-	if _, err := part.Write(fileData); err != nil {
-		c.logger.Error("failed to write gzipped JSON data", "error", err)
-		return nil, err
-	}
-	if err := writer.Close(); err != nil {
-		c.logger.Error("failed to close multipart writer", "error", err)
-		return nil, err
-	}
-
-	// Create the HTTP request
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("https://paprikaapp.com/api/v2/sync/recipe/%s/", recipe.UID), &body)
-	if err != nil {
-		c.logger.Error("failed to create request", "error", err)
-		return nil, err
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.ContentLength = int64(body.Len())
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		c.logger.Error("failed to create recipe", "error", err)
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		c.logger.Error("failed to create recipe", "status", resp.Status)
-		return nil, fmt.Errorf("failed to create recipe: %s", resp.Status)
-	}
-
-	rawBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		c.logger.Error("failed to read response body", "error", err)
-		return nil, err
-	}
-
-	if err := isErrorResponse(rawBytes); err != nil {
-		c.logger.Error("failed to create recipe", "error", err)
-		return nil, err
+	if err := c.postV2(ctx, fmt.Sprintf("https://paprikaapp.com/api/v2/sync/recipe/%s/", recipe.UID), recipe); err != nil {
+		return nil, fmt.Errorf("failed to save recipe: %w", err)
 	}
 
 	defer c.notify(ctx)
-
 	return &recipe, nil
 }
 
@@ -524,5 +606,254 @@ func isErrorResponse(body []byte) error {
 		return fmt.Errorf("error: %s (code: %d)", errResp.Error.Message, errResp.Error.Code)
 	}
 
+	return nil
+}
+
+// postV2 sends a gzipped JSON payload to a V2 API endpoint using multipart form encoding.
+// Uses the Bearer token set on the HTTP client's roundTripper.
+func (c *Client) postV2(ctx context.Context, endpoint string, v interface{}) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("failed to marshal data: %w", err)
+	}
+
+	// Gzip the data
+	var gzipBuf bytes.Buffer
+	gzWriter := gzip.NewWriter(&gzipBuf)
+	if _, err := gzWriter.Write(data); err != nil {
+		gzWriter.Close()
+		return fmt.Errorf("failed to gzip data: %w", err)
+	}
+	if err := gzWriter.Close(); err != nil {
+		return fmt.Errorf("failed to close gzip writer: %w", err)
+	}
+
+	// Build multipart form
+	var body bytes.Buffer
+	mpWriter := multipart.NewWriter(&body)
+	part, err := mpWriter.CreateFormFile("data", "data")
+	if err != nil {
+		return fmt.Errorf("failed to create form file: %w", err)
+	}
+	if _, err := part.Write(gzipBuf.Bytes()); err != nil {
+		return fmt.Errorf("failed to write form data: %w", err)
+	}
+	if err := mpWriter.Close(); err != nil {
+		return fmt.Errorf("failed to close multipart writer: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &body)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", mpWriter.FormDataContentType())
+	req.ContentLength = int64(body.Len())
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	rawBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status %s: %s", resp.Status, string(rawBytes))
+	}
+
+	if err := isErrorResponse(rawBytes); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+
+
+type GroceryList struct {
+	UID            string `json:"uid"`
+	Name           string `json:"name"`
+	OrderFlag      int    `json:"order_flag"`
+	IsDefault      bool   `json:"is_default"`
+	RemindersList  string `json:"reminders_list"`
+	Deleted        bool   `json:"deleted"`
+}
+
+type GroceryListResponse struct {
+	Result []GroceryList `json:"result"`
+}
+
+// ListGroceryLists retrieves all grocery lists from the Paprika API
+func (c *Client) ListGroceryLists(ctx context.Context) (*GroceryListResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://paprikaapp.com/api/v2/sync/grocerylists", nil)
+	if err != nil {
+		c.logger.Error("failed to create request", "error", err)
+		return nil, err
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		c.logger.Error("failed to get grocery lists", "error", err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		c.logger.Error("failed to get grocery lists", "status", resp.Status)
+		return nil, fmt.Errorf("failed to get grocery lists: %s", resp.Status)
+	}
+
+	rawBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.logger.Error("failed to read response body", "error", err)
+		return nil, err
+	}
+
+	var groceryListResp GroceryListResponse
+	if err := json.Unmarshal(rawBytes, &groceryListResp); err != nil {
+		c.logger.Error("failed to unmarshal grocery lists response", "error", err)
+		return nil, err
+	}
+
+	c.logger.Info("Retrieved grocery lists", "count", len(groceryListResp.Result))
+	return &groceryListResp, nil
+}
+
+// ListMealPlan retrieves meal plan data from Paprika API
+func (c *Client) ListMealPlan(ctx context.Context) (*MealPlanResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://paprikaapp.com/api/v2/sync/meals", nil)
+	if err != nil {
+		c.logger.Error("failed to create request", "error", err)
+		return nil, err
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		c.logger.Error("failed to get meals", "error", err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		c.logger.Error("failed to get meals", "status", resp.Status)
+		return nil, fmt.Errorf("failed to get meals: %s", resp.Status)
+	}
+
+	rawBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.logger.Error("failed to read response body", "error", err)
+		return nil, err
+	}
+
+	var mealPlanResp MealPlanResponse
+	if err := json.Unmarshal(rawBytes, &mealPlanResp); err != nil {
+		c.logger.Error("failed to unmarshal meal plan response", "error", err)
+		return nil, err
+	}
+
+	c.logger.Info("Retrieved meal plan", "count", len(mealPlanResp.Result))
+	return &mealPlanResp, nil
+}
+
+// ListGroceries retrieves grocery list data from Paprika API
+func (c *Client) ListGroceries(ctx context.Context) (*GroceryResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://paprikaapp.com/api/v2/sync/groceries", nil)
+	if err != nil {
+		c.logger.Error("failed to create request", "error", err)
+		return nil, err
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		c.logger.Error("failed to get groceries", "error", err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		c.logger.Error("failed to get groceries", "status", resp.Status)
+		return nil, fmt.Errorf("failed to get groceries: %s", resp.Status)
+	}
+
+	rawBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.logger.Error("failed to read response body", "error", err)
+		return nil, err
+	}
+
+	var groceryResp GroceryResponse
+	if err := json.Unmarshal(rawBytes, &groceryResp); err != nil {
+		c.logger.Error("failed to unmarshal grocery response", "error", err)
+		return nil, err
+	}
+
+	c.logger.Info("Retrieved groceries", "count", len(groceryResp.Result))
+	return &groceryResp, nil
+}
+
+// SaveMealPlan saves a meal plan entry to the Paprika API.
+// Meals use the bulk array endpoint POST /api/v2/sync/meals/ (not the per-item pattern recipes use).
+func (c *Client) SaveMealPlan(ctx context.Context, meal MealPlan) (*MealPlan, error) {
+	if meal.UID == "" {
+		meal.UID = strings.ToUpper(uuid.New().String())
+	}
+	meal.Deleted = false
+
+	c.logger.Info("Saving meal", "uid", meal.UID, "name", meal.Name, "date", meal.Date, "type", meal.Type)
+
+	if err := c.postV2(ctx, "https://www.paprikaapp.com/api/v2/sync/meals/", []MealPlan{meal}); err != nil {
+		return nil, fmt.Errorf("failed to save meal: %w", err)
+	}
+
+	defer c.notify(ctx)
+	return &meal, nil
+}
+
+// DeleteMealPlan soft-deletes a meal plan entry by setting the deleted flag
+func (c *Client) DeleteMealPlan(ctx context.Context, uid string) error {
+	c.logger.Info("Soft-deleting meal", "uid", uid)
+
+	meal := MealPlan{UID: uid, Deleted: true}
+	if err := c.postV2(ctx, "https://www.paprikaapp.com/api/v2/sync/meals/", []MealPlan{meal}); err != nil {
+		return fmt.Errorf("failed to delete meal: %w", err)
+	}
+
+	defer c.notify(ctx)
+	return nil
+}
+
+// SaveGroceryItem saves a grocery item to the Paprika API.
+// Groceries use the bulk array endpoint POST /api/v2/sync/groceries/ (not the per-item pattern recipes use).
+func (c *Client) SaveGroceryItem(ctx context.Context, item GroceryItem) (*GroceryItem, error) {
+	if item.UID == "" {
+		item.UID = strings.ToUpper(uuid.New().String())
+	}
+	if item.Name == "" {
+		item.Name = item.Ingredient
+	}
+
+	c.logger.Info("Saving grocery item", "uid", item.UID, "ingredient", item.Ingredient, "aisle", item.Aisle)
+
+	if err := c.postV2(ctx, "https://www.paprikaapp.com/api/v2/sync/groceries/", []GroceryItem{item}); err != nil {
+		return nil, fmt.Errorf("failed to save grocery item: %w", err)
+	}
+
+	defer c.notify(ctx)
+	return &item, nil
+}
+
+// DeleteGroceryItem soft-deletes a grocery item by setting the deleted flag
+func (c *Client) DeleteGroceryItem(ctx context.Context, uid string) error {
+	c.logger.Info("Soft-deleting grocery item", "uid", uid)
+
+	item := GroceryItem{UID: uid, Deleted: true}
+	if err := c.postV2(ctx, "https://www.paprikaapp.com/api/v2/sync/groceries/", []GroceryItem{item}); err != nil {
+		return fmt.Errorf("failed to delete grocery item: %w", err)
+	}
+
+	defer c.notify(ctx)
 	return nil
 }
